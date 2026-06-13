@@ -15,7 +15,7 @@ from PyQt6.QtGui import QAction, QColor, QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFileDialog,
     QFormLayout, QHBoxLayout, QHeaderView, QLabel,
-    QLineEdit, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
+    QLineEdit, QMenu, QMessageBox, QPlainTextEdit, QPushButton, QSpinBox,
     QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
     QCheckBox, QColorDialog, QDialogButtonBox, QTabWidget, QMainWindow,
     QToolBar, QStatusBar, QSplitter, QListWidget, QListWidgetItem,
@@ -70,7 +70,7 @@ class DataModel:
                 print(f"加载备份样例失败: {e}")
 
     def save(self):
-        """保存数据到文件"""
+        """保存数据到文件（紧凑JSON，写盘更快）"""
         data = {
             'version': self.version,
             'articles': self.articles,
@@ -79,21 +79,25 @@ class DataModel:
             'next_concept_id': self.next_concept_id
         }
         with open(self.APP_DATA_FILE, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            json.dump(data, f, ensure_ascii=False)
 
     def count_chinese_chars(self, text: str) -> int:
-        """统计汉字数量"""
+        """统计汉字数量（re 底层为 C，快于 Python 循环）"""
+        if not text:
+            return 0
         return len(re.findall(r'[\u4e00-\u9fff]', text))
 
-    def add_article(self, article_data: dict) -> int:
+    def add_article(self, article_data: dict, save_now: bool = True) -> int:
         """添加文章"""
         article_data['id'] = self.next_article_id
         article_data['chineseChars'] = self.count_chinese_chars(article_data.get('content', ''))
-        article_data['createTime'] = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
-        article_data['lastModified'] = article_data['createTime']
+        _now = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+        article_data['createTime'] = _now
+        article_data['lastModified'] = _now
         self.articles.append(article_data)
         self.next_article_id += 1
-        self.save()
+        if save_now:
+            self.save()
         return article_data['id']
 
     def update_article(self, article_id: int, article_data: dict):
@@ -114,14 +118,16 @@ class DataModel:
         self.articles = [a for a in self.articles if a['id'] not in article_ids]
         self.save()
 
-    def add_concept(self, concept_data: dict) -> int:
+    def add_concept(self, concept_data: dict, save_now: bool = True) -> int:
         """添加概念"""
         concept_data['id'] = self.next_concept_id
-        concept_data['createTime'] = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
-        concept_data['lastModified'] = concept_data['createTime']
+        _now = datetime.now().strftime('%Y-%m-%dT%H:%M:%S')
+        concept_data['createTime'] = _now
+        concept_data['lastModified'] = _now
         self.concepts.append(concept_data)
         self.next_concept_id += 1
-        self.save()
+        if save_now:
+            self.save()
         return concept_data['id']
 
     def update_concept(self, concept_id: int, concept_data: dict):
@@ -404,12 +410,8 @@ class ArticleEditDialog(QDialog):
         # 状态复选框
         status_layout = QHBoxLayout()
         self.isReadingCheck = QCheckBox("正在阅读")
-        self.isReadingCheck.setChecked(True)  # 默认勾选
-        self.isBoldCheck = QCheckBox("粗体")
-        self.isLongArticleCheck = QCheckBox("长文")
+        self.isReadingCheck.setChecked(True)
         status_layout.addWidget(self.isReadingCheck)
-        status_layout.addWidget(self.isBoldCheck)
-        status_layout.addWidget(self.isLongArticleCheck)
         options_layout.addRow("状态:", status_layout)
 
         # 必读设置
@@ -435,18 +437,6 @@ class ArticleEditDialog(QDialog):
             self.fontSizeSpin.setValue(16)
         options_layout.addRow("字号:", self.fontSizeSpin)
 
-        # 颜色
-        color_layout = QHBoxLayout()
-        self.fontColorEdit = QLineEdit()
-        self.fontColorEdit.setPlaceholderText("#000000")
-        if self.article:
-            self.fontColorEdit.setText(self.article.get('fontColor', '#000000'))
-        self.colorPickerBtn = QPushButton("选择颜色")
-        self.colorPickerBtn.clicked.connect(self.pick_color)
-        color_layout.addWidget(self.fontColorEdit)
-        color_layout.addWidget(self.colorPickerBtn)
-        options_layout.addRow("颜色:", color_layout)
-
         # 数值设置
         self.independentCheckRateSpin = QSpinBox()
         self.independentCheckRateSpin.setRange(0, 100)
@@ -469,10 +459,17 @@ class ArticleEditDialog(QDialog):
         # 设置初始值
         if self.article:
             self.isReadingCheck.setChecked(self.article.get('isReading', False))
-            self.isBoldCheck.setChecked(self.article.get('isBold', False))
-            self.isLongArticleCheck.setChecked(self.article.get('isLongArticle', False))
             self.isRequiredCheck.setChecked(self.article.get('isRequired', False))
             self.useIndependentCheckRateCheck.setChecked(self.article.get('useIndependentCheckRate', False))
+        else:
+            # 新建文章时，从设置读取默认值
+            from PyQt6.QtCore import QSettings
+            settings = QSettings("DailyRead", "ArticleConceptManager")
+            self.isReadingCheck.setChecked(settings.value("article_default_isReading", True, type=bool))
+            self.isRequiredCheck.setChecked(settings.value("article_default_isRequired", False, type=bool))
+            self.useIndependentCheckRateCheck.setChecked(
+                settings.value("article_default_useIndependentCheckRate", False, type=bool)
+            )
 
         layout.addWidget(options_group)
 
@@ -493,12 +490,6 @@ class ArticleEditDialog(QDialog):
             return
 
         self.accept()
-
-    def pick_color(self):
-        """选择颜色"""
-        color = QColorDialog.getColor()
-        if color.isValid():
-            self.fontColorEdit.setText(color.name())
 
     def get_data(self) -> list:
         """获取编辑后的数据，可能返回单条或多条"""
@@ -527,13 +518,10 @@ class ArticleEditDialog(QDialog):
                             'contentHtml': '',
                             'fontFamily': self.fontFamilyCombo.currentText(),
                             'fontSize': self.fontSizeSpin.value(),
-                            'fontColor': self.fontColorEdit.text() or '#000000',
-                            'isBold': self.isBoldCheck.isChecked(),
                             'isReading': self.isReadingCheck.isChecked(),
                             'isRequired': self.isRequiredCheck.isChecked(),
                             'useIndependentCheckRate': self.useIndependentCheckRateCheck.isChecked(),
                             'independentCheckRate': self.independentCheckRateSpin.value(),
-                            'isLongArticle': self.isLongArticleCheck.isChecked(),
                             'checkInDays': self.checkInDaysSpin.value(),
                             'completionRate': self.completionRateSpin.value()
                         })
@@ -546,13 +534,10 @@ class ArticleEditDialog(QDialog):
             'contentHtml': self.article.get('contentHtml', ''),
             'fontFamily': self.fontFamilyCombo.currentText(),
             'fontSize': self.fontSizeSpin.value(),
-            'fontColor': self.fontColorEdit.text() or '#000000',
-            'isBold': self.isBoldCheck.isChecked(),
             'isReading': self.isReadingCheck.isChecked(),
             'isRequired': self.isRequiredCheck.isChecked(),
             'useIndependentCheckRate': self.useIndependentCheckRateCheck.isChecked(),
             'independentCheckRate': self.independentCheckRateSpin.value(),
-            'isLongArticle': self.isLongArticleCheck.isChecked(),
             'checkInDays': self.checkInDaysSpin.value(),
             'completionRate': self.completionRateSpin.value()
         }]
@@ -757,7 +742,7 @@ class QuickPasteDialog(QDialog):
                 if len(parts) >= 1:
                     title = parts[0].strip()
                     content = parts[1].strip() if len(parts) > 1 else ""
-                    self.parsed_data.append({'title': title, 'content': content})
+                    self.parsed_data.append({'title': title, 'content': content, 'isReading': True})
             else:
                 parts = line.split('|')
                 while len(parts) < 5:
@@ -997,31 +982,63 @@ class ArticlePage(QWidget):
         self.searchEdit.setFocus()
 
     def refresh_table(self, articles: list = None):
-        """刷新表格"""
+        """刷新表格（优化：禁用重绘 + 单次循环填充，避免每行触发重排）"""
         if articles is None:
             articles = self.data_model.articles
 
+        # 先禁用重绘，避免每次setItem触发布局重算
+        self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(articles))
 
-        for row, article in enumerate(articles):
-            self.table.setItem(row, 0, QTableWidgetItem(str(article.get('id', ''))))
-            self.table.setItem(row, 1, QTableWidgetItem(article.get('title', '')))
-            self.table.setItem(row, 2, QTableWidgetItem(str(article.get('chineseChars', 0))))
-            self.table.setItem(row, 3, QTableWidgetItem("是" if article.get('isReading') else "否"))
-            self.table.setItem(row, 4, QTableWidgetItem(str(article.get('independentCheckRate', 0)) + "%"))
-            self.table.setItem(row, 5, QTableWidgetItem("是" if article.get('useIndependentCheckRate') else "否"))
-            self.table.setItem(row, 6, QTableWidgetItem("是" if article.get('isRequired') else "否"))
-            self.table.setItem(row, 7, QTableWidgetItem(str(article.get('checkInDays', 0))))
-            self.table.setItem(row, 8, QTableWidgetItem(str(article.get('completionRate', 0)) + "%"))
+        _align = Qt.AlignmentFlag.AlignCenter
+        _QTableWidgetItem = QTableWidgetItem
 
+        for row, article in enumerate(articles):
+            # ID列
+            item0 = _QTableWidgetItem(str(article.get('id', '')))
+            item0.setTextAlignment(_align)
+            self.table.setItem(row, 0, item0)
+            # 标题
+            item1 = _QTableWidgetItem(article.get('title', ''))
+            item1.setTextAlignment(_align)
+            self.table.setItem(row, 1, item1)
+            # 汉字数
+            item2 = _QTableWidgetItem(str(article.get('chineseChars', 0)))
+            item2.setTextAlignment(_align)
+            self.table.setItem(row, 2, item2)
+            # 正在阅读
+            item3 = _QTableWidgetItem("是" if article.get('isReading') else "否")
+            item3.setTextAlignment(_align)
+            self.table.setItem(row, 3, item3)
+            # 独立完成率
+            item4 = _QTableWidgetItem(str(article.get('independentCheckRate', 0)) + "%")
+            item4.setTextAlignment(_align)
+            self.table.setItem(row, 4, item4)
+            # 使用独立
+            item5 = _QTableWidgetItem("是" if article.get('useIndependentCheckRate') else "否")
+            item5.setTextAlignment(_align)
+            self.table.setItem(row, 5, item5)
+            # 必读
+            item6 = _QTableWidgetItem("是" if article.get('isRequired') else "否")
+            item6.setTextAlignment(_align)
+            self.table.setItem(row, 6, item6)
+            # 累计打卡
+            item7 = _QTableWidgetItem(str(article.get('checkInDays', 0)))
+            item7.setTextAlignment(_align)
+            self.table.setItem(row, 7, item7)
+            # 完成率
+            item8 = _QTableWidgetItem(str(article.get('completionRate', 0)) + "%")
+            item8.setTextAlignment(_align)
+            self.table.setItem(row, 8, item8)
+            # 内容
             content = article.get('content', '')
             display_content = content[:50] + "..." if len(content) > 50 else content
-            self.table.setItem(row, 9, QTableWidgetItem(display_content))
+            item9 = _QTableWidgetItem(display_content)
+            item9.setTextAlignment(_align)
+            self.table.setItem(row, 9, item9)
 
-            for col in range(10):
-                item = self.table.item(row, col)
-                if item:
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        # 恢复重绘，只触发一次完整刷新
+        self.table.setUpdatesEnabled(True)
 
     def on_search(self, text: str):
         """搜索过滤"""
@@ -1053,15 +1070,20 @@ class ArticlePage(QWidget):
         action = menu.exec(self.table.mapToGlobal(pos))
 
         if action == delete_action:
-            self.do_delete_article()
+            self.delete_articles()
 
     def add_article(self):
         """添加文章"""
         dialog = ArticleEditDialog(parent=self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             data_list = dialog.get_data()
-            for data in data_list:
-                self.data_model.add_article(data)
+            # 先批量写入内存，最后只写一次磁盘
+            if len(data_list) == 1:
+                self.data_model.add_article(data_list[0])
+            else:
+                for data in data_list:
+                    self.data_model.add_article(data, save_now=False)
+                self.data_model.save()
             self.refresh_table()
             QMessageBox.information(self, "成功", f"已添加 {len(data_list)} 篇文章")
 
@@ -1082,6 +1104,8 @@ class ArticlePage(QWidget):
         dialog = ArticleEditDialog(article, self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             data = dialog.get_data()
+            if data and isinstance(data, list):
+                data = data[0]
             self.data_model.update_article(article['id'], data)
             self.refresh_table()
             QMessageBox.information(self, "成功", "文章更新成功")
@@ -1104,8 +1128,11 @@ class ArticlePage(QWidget):
         dialog = QuickPasteDialog("article", self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
             data_list = dialog.get_parsed_data()
+            # 批量写入内存，最后只写一次磁盘
             for data in data_list:
-                self.data_model.add_article(data)
+                self.data_model.add_article(data, save_now=False)
+            if data_list:
+                self.data_model.save()
             self.refresh_table()
             QMessageBox.information(self, "成功", f"已添加 {len(data_list)} 篇文章")
 
@@ -1249,28 +1276,45 @@ class ConceptPage(QWidget):
         self.searchEdit.setFocus()
 
     def refresh_table(self, concepts: list = None):
-        """刷新表格"""
+        """刷新表格（优化：禁用重绘 + 单次循环填充）"""
         if concepts is None:
             concepts = self.data_model.concepts
 
+        self.table.setUpdatesEnabled(False)
         self.table.setRowCount(len(concepts))
 
+        _align = Qt.AlignmentFlag.AlignCenter
+        _QTableWidgetItem = QTableWidgetItem
+
         for row, concept in enumerate(concepts):
-            self.table.setItem(row, 0, QTableWidgetItem(str(concept.get('id', ''))))
-            self.table.setItem(row, 1, QTableWidgetItem(concept.get('title', '')))
-            self.table.setItem(row, 2, QTableWidgetItem(concept.get('category', '')))
-            self.table.setItem(row, 3, QTableWidgetItem(concept.get('subject', '')))
-            self.table.setItem(row, 4, QTableWidgetItem(concept.get('chapter', '')))
+            item0 = _QTableWidgetItem(str(concept.get('id', '')))
+            item0.setTextAlignment(_align)
+            self.table.setItem(row, 0, item0)
+
+            item1 = _QTableWidgetItem(concept.get('title', ''))
+            item1.setTextAlignment(_align)
+            self.table.setItem(row, 1, item1)
+
+            item2 = _QTableWidgetItem(concept.get('category', ''))
+            item2.setTextAlignment(_align)
+            self.table.setItem(row, 2, item2)
+
+            item3 = _QTableWidgetItem(concept.get('subject', ''))
+            item3.setTextAlignment(_align)
+            self.table.setItem(row, 3, item3)
+
+            item4 = _QTableWidgetItem(concept.get('chapter', ''))
+            item4.setTextAlignment(_align)
+            self.table.setItem(row, 4, item4)
 
             # 内容列
             content = concept.get('content', '')
             display_content = content[:50] + "..." if len(content) > 50 else content
-            self.table.setItem(row, 5, QTableWidgetItem(display_content))
+            item5 = _QTableWidgetItem(display_content)
+            item5.setTextAlignment(_align)
+            self.table.setItem(row, 5, item5)
 
-            for col in range(6):
-                item = self.table.item(row, col)
-                if item:
-                    item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.table.setUpdatesEnabled(True)
 
     def on_search(self, text: str):
         """搜索过滤"""
@@ -1302,7 +1346,7 @@ class ConceptPage(QWidget):
         action = menu.exec(self.table.mapToGlobal(pos))
 
         if action == delete_action:
-            self.do_delete_concept()
+            self.delete_concepts()
 
     def add_concept(self):
         """添加概念"""
@@ -1314,8 +1358,13 @@ class ConceptPage(QWidget):
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             data_list = dialog.get_data()
-            for data in data_list:
-                self.data_model.add_concept(data)
+            # 批量写入内存，最后只写一次磁盘
+            if len(data_list) == 1:
+                self.data_model.add_concept(data_list[0])
+            else:
+                for data in data_list:
+                    self.data_model.add_concept(data, save_now=False)
+                self.data_model.save()
             self.refresh_table()
             QMessageBox.information(self, "成功", f"已添加 {len(data_list)} 个概念")
 
@@ -1342,6 +1391,8 @@ class ConceptPage(QWidget):
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             data = dialog.get_data()
+            if data and isinstance(data, list):
+                data = data[0]
             self.data_model.update_concept(concept['id'], data)
             self.refresh_table()
             QMessageBox.information(self, "成功", "概念更新成功")
@@ -1365,7 +1416,9 @@ class ConceptPage(QWidget):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             data_list = dialog.get_parsed_data()
             for data in data_list:
-                self.data_model.add_concept(data)
+                self.data_model.add_concept(data, save_now=False)
+            if data_list:
+                self.data_model.save()
             self.refresh_table()
             QMessageBox.information(self, "成功", f"已添加 {len(data_list)} 个概念")
 
@@ -1687,7 +1740,14 @@ class SettingsPage(QWidget):
             'add_concept': 'Ctrl+N',
             'search_concept': 'Ctrl+F'
         }
+        # 文章默认设置
+        self.article_defaults = {
+            'isReading': True,
+            'isRequired': False,
+            'useIndependentCheckRate': False
+        }
         self.load_shortcuts()
+        self.load_article_defaults()
         self.setup_ui()
 
     def load_shortcuts(self):
@@ -1705,6 +1765,24 @@ class SettingsPage(QWidget):
         settings = QSettings("DailyRead", "ArticleConceptManager")
         for key, value in self.shortcuts.items():
             settings.setValue(f"shortcut_{key}", value)
+
+    def load_article_defaults(self):
+        """加载文章默认设置"""
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("DailyRead", "ArticleConceptManager")
+        self.article_defaults['isReading'] = settings.value("article_default_isReading", True, type=bool)
+        self.article_defaults['isRequired'] = settings.value("article_default_isRequired", False, type=bool)
+        self.article_defaults['useIndependentCheckRate'] = settings.value(
+            "article_default_useIndependentCheckRate", False, type=bool
+        )
+
+    def save_article_defaults(self):
+        """保存文章默认设置"""
+        from PyQt6.QtCore import QSettings
+        settings = QSettings("DailyRead", "ArticleConceptManager")
+        settings.setValue("article_default_isReading", self.article_defaults['isReading'])
+        settings.setValue("article_default_isRequired", self.article_defaults['isRequired'])
+        settings.setValue("article_default_useIndependentCheckRate", self.article_defaults['useIndependentCheckRate'])
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -1745,15 +1823,33 @@ class SettingsPage(QWidget):
         # 按钮
         button_layout = QHBoxLayout()
         save_btn = QPushButton("保存设置")
-        save_btn.clicked.connect(self.on_save_shortcuts)
+        save_btn.clicked.connect(self.on_save_settings)
         button_layout.addWidget(save_btn)
 
         reset_btn = QPushButton("恢复默认")
-        reset_btn.clicked.connect(self.on_reset_shortcuts)
+        reset_btn.clicked.connect(self.on_reset_settings)
         button_layout.addWidget(reset_btn)
 
         shortcut_layout.addRow(button_layout)
         layout.addWidget(shortcut_group)
+
+        # 文章默认设置
+        article_defaults_group = QGroupBox("文章默认设置")
+        article_defaults_layout = QHBoxLayout(article_defaults_group)
+
+        self.default_isReading_check = QCheckBox("正在阅读")
+        self.default_isReading_check.setChecked(self.article_defaults['isReading'])
+        article_defaults_layout.addWidget(self.default_isReading_check)
+
+        self.default_isRequired_check = QCheckBox("必读")
+        self.default_isRequired_check.setChecked(self.article_defaults['isRequired'])
+        article_defaults_layout.addWidget(self.default_isRequired_check)
+
+        self.default_useIndependent_check = QCheckBox("使用独立目标完成率")
+        self.default_useIndependent_check.setChecked(self.article_defaults['useIndependentCheckRate'])
+        article_defaults_layout.addWidget(self.default_useIndependent_check)
+
+        layout.addWidget(article_defaults_group)
 
         about_group = QGroupBox("关于")
         about_layout = QVBoxLayout(about_group)
@@ -1772,17 +1868,24 @@ class SettingsPage(QWidget):
 
         layout.addStretch()
 
-    def on_save_shortcuts(self):
-        """保存快捷键设置"""
+    def on_save_settings(self):
+        """保存全部设置"""
+        # 快捷键
         self.shortcuts['add_article'] = self.add_article_edit.text().strip()
         self.shortcuts['search_article'] = self.search_article_edit.text().strip()
         self.shortcuts['add_concept'] = self.add_concept_edit.text().strip()
         self.shortcuts['search_concept'] = self.search_concept_edit.text().strip()
         self.save_shortcuts()
-        QMessageBox.information(self, "成功", "快捷键设置已保存，重启后生效")
+        # 文章默认设置
+        self.article_defaults['isReading'] = self.default_isReading_check.isChecked()
+        self.article_defaults['isRequired'] = self.default_isRequired_check.isChecked()
+        self.article_defaults['useIndependentCheckRate'] = self.default_useIndependent_check.isChecked()
+        self.save_article_defaults()
+        QMessageBox.information(self, "成功", "设置已保存，添加新文章时将生效")
 
-    def on_reset_shortcuts(self):
-        """恢复默认快捷键"""
+    def on_reset_settings(self):
+        """恢复所有默认设置"""
+        # 快捷键
         self.shortcuts = {
             'add_article': 'Ctrl+N',
             'search_article': 'Ctrl+F',
@@ -1794,7 +1897,17 @@ class SettingsPage(QWidget):
         self.add_concept_edit.setText('Ctrl+N')
         self.search_concept_edit.setText('Ctrl+F')
         self.save_shortcuts()
-        QMessageBox.information(self, "成功", "已恢复默认快捷键")
+        # 文章默认设置
+        self.article_defaults = {
+            'isReading': True,
+            'isRequired': False,
+            'useIndependentCheckRate': False
+        }
+        self.default_isReading_check.setChecked(True)
+        self.default_isRequired_check.setChecked(False)
+        self.default_useIndependent_check.setChecked(False)
+        self.save_article_defaults()
+        QMessageBox.information(self, "成功", "已恢复默认设置")
 
 
 # ==================== 主窗口 ====================
